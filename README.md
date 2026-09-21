@@ -34,7 +34,7 @@ python app.py
 
 可通过环境变量覆盖监听地址：`HOST`（默认 `0.0.0.0`）、`PORT`（默认 `8000`）。
 
-> `python app.py` 使用的是 Flask 自带服务器，仅适合开发调试，生产环境请用下面的部署方式。
+> `python app.py` 使用的是 Flask 自带服务器，仅适合开发调试。生产环境请自行选择 WSGI 服务器部署。
 
 ## API
 
@@ -140,11 +140,10 @@ address_parse/
 │   ├── test_parser.py        # 解析核心回归测试
 │   └── test_api.py           # HTTP 接口与参数校验测试
 ├── requirements.txt
-├── gunicorn_conf.py          # Gunicorn 部署配置（可移植，环境变量驱动）
 └── LICENSE
 ```
 
-含本机绝对路径的服务器本地配置（`uwsgi.ini`、`.htaccess`、`*.pid`、`gunicorn_conf.local.py` 等）已列入 `.gitignore`，不会进入版本库。
+仓库只包含应用源码，不含任何部署配置。含本机路径、端口、日志路径的服务器配置（`uwsgi.ini`、`gunicorn_conf.py`、`.htaccess`、`*.pid` 等）已在 `.gitignore` 中排除。
 
 ## 测试
 
@@ -156,55 +155,19 @@ python -m unittest discover -s tests -t . -v
 
 ## 部署
 
-### Gunicorn（推荐，配置可移植）
-
-配置项均可用环境变量覆盖，默认值与具体服务器无关：
+本仓库只提供应用源码，不含部署配置。生产环境请用任意 WSGI 服务器加载 `app.py` 中的 `app` 对象，进程数、监听地址、日志路径等按各环境自行决定。
 
 ```bash
-pip install -r requirements.txt
-gunicorn -c gunicorn_conf.py app:app
-```
-
-| 环境变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `GUNICORN_BIND` | `0.0.0.0:8000` | 监听地址 |
-| `GUNICORN_WORKERS` | `4` | 进程数 |
-| `GUNICORN_THREADS` | `2` | 每进程线程数 |
-| `GUNICORN_LOG_LEVEL` | `info` | 日志级别 |
-| `GUNICORN_ACCESS_LOG` / `GUNICORN_ERROR_LOG` | `-` | 日志路径，默认输出到标准输出/错误 |
-| `GUNICORN_PIDFILE` | `<项目目录>/gunicorn.pid` | 进程文件 |
-
-需要以低权限用户运行时，请在命令行追加参数（不要写死在配置里，否则非 root 用户加载配置会失败）：
-
-```bash
-gunicorn -c gunicorn_conf.py --user www --group www app:app
-```
-
-### uWSGI
-
-`uwsgi.ini` 含本机绝对路径与端口，属于服务器本地配置，不入版本库。需要时在项目根目录自行创建：
-
-```ini
-[uwsgi]
-chdir=/path/to/address_parse
-wsgi-file=/path/to/address_parse/app.py
-callable=app
-processes=4
-threads=2
-http=0.0.0.0:6653
-master=true
-uid=www
-gid=www
-pidfile=/path/to/address_parse/uwsgi.pid
-daemonize=/path/to/address_parse/uwsgi.log
+pip install gunicorn
+gunicorn -w 4 -b 0.0.0.0:8000 app:app
 ```
 
 ```bash
 pip install uwsgi
-uwsgi --ini uwsgi.ini
+uwsgi --http 0.0.0.0:8000 --wsgi-file app.py --callable app --processes 4 --threads 2
 ```
 
-`chdir` 必须写成绝对路径：uWSGI 会先应用 `chdir` 再解析其余相对配置，且它不提供"环境变量缺省值"机制，写成 `%(ENV_XXX)` 时环境变量缺失会导致启动直接失败。
+若改写成 uWSGI 的 ini 配置文件，`chdir` 必须使用绝对路径：uWSGI 会先应用 `chdir` 再解析其余相对配置，且不提供"环境变量缺省值"机制，写成 `%(ENV_XXX)` 时环境变量缺失会导致启动直接失败。
 
 ## 数据说明
 
