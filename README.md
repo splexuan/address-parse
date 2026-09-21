@@ -14,7 +14,7 @@
 - 简称与后缀缺省补全：`浙江杭州西湖区` → `浙江省 / 杭州市 / 西湖区`
 - 历史区划纠错：`蓟县` → `蓟州区`、`延庆县` → `延庆区`
 - 直辖市与省直辖县级市特殊处理（`市辖区` 归一、`神农架 / 仙桃` 归入区县）
-- 支持自定义过滤词与补充行政区划数据
+- 支持自定义过滤词与请求级补充行政区划数据（`extraGovData` 不会污染其他请求）
 
 ## 快速开始
 
@@ -34,6 +34,8 @@ python app.py
 
 可通过环境变量覆盖监听地址：`HOST`（默认 `0.0.0.0`）、`PORT`（默认 `8000`）。
 
+> `python app.py` 使用的是 Flask 自带服务器，仅适合开发调试，生产环境请用下面的部署方式。
+
 ## API
 
 ### GET /api/parse
@@ -42,11 +44,16 @@ python app.py
 /api/parse?address=浙江省杭州市西湖区文三路138号 张三 13800138000&type=0&name_max_length=4
 ```
 
+请求参数（GET 与 POST 通用）：
+
 | 参数 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `address` | string | 是 | 待解析地址（需 URL 编码） |
-| `type` | int | 否 | `0` 正则匹配（默认），`1` 树查找 |
-| `name_max_length` | int | 否 | 姓名最大长度，默认 `4` |
+| `address` | string | 是 | 待解析地址（需 URL 编码），最长 2000 字符 |
+| `type` | int | 否 | `0` 正则匹配（默认），`1` 树查找，取值 `0~1` |
+| `name_max_length` | int | 否 | 姓名最大长度，默认 `4`，取值 `1~20` |
+| `text_filter` | string[] | 否 | 预清洗词列表；GET 可重复传参，如 `text_filter=电话&text_filter=备注` |
+
+参数非法（类型错误、超出范围、缺失 `address`）统一返回 **HTTP 400**。
 
 ### POST /api/parse
 
@@ -82,6 +89,12 @@ curl -X POST http://localhost:8000/api/parse \
 }
 ```
 
+失败时返回 `success: false` 与 `message`，`data` 为空对象：
+
+```json
+{ "success": false, "message": "缺少 address 参数", "data": {} }
+```
+
 ## Python 调用
 
 ```python
@@ -95,56 +108,101 @@ result = address_parse('浙江省杭州市西湖区文三路138号 张三 138001
 print(result)
 ```
 
+`address_parse` 对参数做了归一化：`type` / `nameMaxLength` 传字符串会被转换，非法值回落到默认（分别为 `0` 和 `4`），`textFilter` 非列表时按空列表处理，函数不会因参数类型抛异常。
+
+### 补充行政区划数据
+
+`extraGovData` 是**请求级**的，只在本次调用的副本上合并，不会影响后续请求：
+
+```python
+address_parse('测试省测试市测试区某路1号 张三', {
+    'extraGovData': {
+        'province': [{'code': '990000', 'name': '测试省'}],
+        'city': [{'code': '990100', 'name': '测试市', 'provinceCode': '990000'}],
+        'area': [{'code': '990101', 'name': '测试区', 'cityCode': '990100',
+                  'provinceCode': '990000'}],
+    }
+})
+```
+
+如果需要长期生效，可显式调用 `parser.set_extra_gov_data(...)` 修改进程级数据（多进程部署下各 worker 需各自设置）。
+
 ## 项目结构
 
 ```
 address_parse/
-├── app.py                    # Flask 服务：API、演示页、接口文档
+├── app.py                    # Flask 服务：API、演示页、接口文档、参数校验
 ├── parser.py                 # 解析核心：清洗、提取、省市区匹配、姓名识别
 ├── data/
 │   ├── provinceList.json     # 省 / 市 / 区行政区划树
 │   └── names.json            # 百家姓表
+├── tests/
+│   ├── test_parser.py        # 解析核心回归测试
+│   └── test_api.py           # HTTP 接口与参数校验测试
 ├── requirements.txt
-├── gunicorn_conf.py          # Gunicorn 部署配置（可选）
-└── uwsgi.ini                 # uWSGI 部署配置（可选）
+├── gunicorn_conf.py          # Gunicorn 部署配置（可移植，环境变量驱动）
+├── uwsgi.ini                 # uWSGI 部署配置（针对具体服务器，需按环境修改）
+└── LICENSE
 ```
+
+## 测试
+
+```bash
+python -m unittest discover -s tests -t . -v
+```
+
+仅依赖标准库的 `unittest`，无需额外安装测试框架。当前 60 项用例覆盖两种解析模式、简称补全、省直辖县级单位、历史区划改名、邮编与手机号提取、姓名识别、参数归一化与接口参数校验。
 
 ## 部署
 
-### Gunicorn
+### Gunicorn（推荐，配置可移植）
+
+配置项均可用环境变量覆盖，默认值与具体服务器无关：
 
 ```bash
-pip install gunicorn
+pip install -r requirements.txt
 gunicorn -c gunicorn_conf.py app:app
+```
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `GUNICORN_BIND` | `0.0.0.0:8000` | 监听地址 |
+| `GUNICORN_WORKERS` | `4` | 进程数 |
+| `GUNICORN_THREADS` | `2` | 每进程线程数 |
+| `GUNICORN_LOG_LEVEL` | `info` | 日志级别 |
+| `GUNICORN_ACCESS_LOG` / `GUNICORN_ERROR_LOG` | `-` | 日志路径，默认输出到标准输出/错误 |
+| `GUNICORN_PIDFILE` | `<项目目录>/gunicorn.pid` | 进程文件 |
+
+需要以低权限用户运行时，请在命令行追加参数（不要写死在配置里，否则非 root 用户加载配置会失败）：
+
+```bash
+gunicorn -c gunicorn_conf.py --user www --group www app:app
 ```
 
 ### uWSGI
 
 ```bash
+pip install uwsgi
 uwsgi --ini uwsgi.ini
 ```
 
-两个配置默认监听 `0.0.0.0:6653`，请按需修改 `bind` / `http` 与日志路径。
+`uwsgi.ini` 中的 `chdir` / `pidfile` / 日志路径 / 端口均为服务器专用值，移植到其他环境时需自行修改。
 
 ## 数据说明
 
-行政区划数据为三级树形结构（省 / 市 / 区），节点包含 `code`、`name` 字段，可直接替换 `data/provinceList.json` 以更新区划。也可在运行时通过 `extraGovData` 选项补充：
+行政区划数据为三级树形结构（省 / 市 / 区），节点包含 `code`、`name` 字段，可直接替换 `data/provinceList.json` 以更新区划。`parser.py` 在导入时加载数据，修改后需重启服务。
 
-```python
-address_parse(text, {
-    'extraGovData': {
-        'province': [{'code': '990000', 'name': '某某省'}],
-        'city': [{'code': '990100', 'name': '某某市', 'provinceCode': '990000'}],
-        'area': [{'code': '990101', 'name': '某某区', 'cityCode': '990100', 'provinceCode': '990000'}],
-    }
-})
-```
+## 已知取舍
+
+- 手机号仅识别 11 位手机号（可带 `+86`、`17951` 前缀或 `-` 分隔），不识别固定电话
+- 姓名识别为启发式规则（姓氏表 + 称呼词 + 地址关键词黑名单），无法覆盖所有复姓与少数民族姓名
+- 邮编识别要求 6 位数字前后不紧邻其他数字，且不能紧跟 `号 / 室 / 楼` 等门牌号后缀
 
 ## 致谢
 
-- 解析算法参考 [zh-address-parse](https://github.com/ldwonday/zh-address-parse)
+- 解析算法参考 [zh-address-parse](https://github.com/ldwonday/zh-address-parse)（MIT）
 - 行政区划数据来源：国家地名信息库
 
 ## License
 
-MIT
+[MIT](LICENSE)

@@ -1,2 +1,5 @@
 flask>=3.0.0
 gunicorn>=21.2.0
+
+# 使用 uwsgi.ini 部署时再额外安装（uWSGI 依赖系统构建工具，不随项目默认安装）：
+# uwsgi>=2.0.23
