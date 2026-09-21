@@ -34,7 +34,7 @@ python app.py
 
 可通过环境变量覆盖监听地址：`HOST`（默认 `0.0.0.0`）、`PORT`（默认 `8000`）。
 
-> `python app.py` 使用的是 Flask 自带服务器，仅适合开发调试。生产环境请自行选择 WSGI 服务器部署。
+> `python app.py` 使用 Flask 自带服务器，适合本地开发调试；生产环境见 [部署](#部署)。
 
 ## API
 
@@ -143,8 +143,6 @@ address_parse/
 └── LICENSE
 ```
 
-仓库只包含应用源码，不含任何部署配置。含本机路径、端口、日志路径的服务器配置（`uwsgi.ini`、`gunicorn_conf.py`、`.htaccess`、`*.pid` 等）已在 `.gitignore` 中排除。
-
 ## 测试
 
 ```bash
@@ -155,7 +153,7 @@ python -m unittest discover -s tests -t . -v
 
 ## 部署
 
-本仓库只提供应用源码，不含部署配置。生产环境请用任意 WSGI 服务器加载 `app.py` 中的 `app` 对象，进程数、监听地址、日志路径等按各环境自行决定。
+生产环境用任意 WSGI 服务器加载 `app.py` 中的 `app` 对象即可：
 
 ```bash
 pip install gunicorn
@@ -167,7 +165,7 @@ pip install uwsgi
 uwsgi --http 0.0.0.0:8000 --wsgi-file app.py --callable app --processes 4 --threads 2
 ```
 
-若改写成 uWSGI 的 ini 配置文件，`chdir` 必须使用绝对路径：uWSGI 会先应用 `chdir` 再解析其余相对配置，且不提供"环境变量缺省值"机制，写成 `%(ENV_XXX)` 时环境变量缺失会导致启动直接失败。
+进程数、监听地址与日志路径按实际环境调整。
 
 ## 数据说明
 

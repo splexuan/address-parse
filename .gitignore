@@ -39,7 +39,7 @@ Thumbs.db
 .env.*
 !.env.example
 
-# 部署配置（仓库只提供源码，部署方式由使用者自行决定）
+# 部署配置
 .htaccess
 .user.ini
 uwsgi.ini
