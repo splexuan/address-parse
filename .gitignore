@@ -39,6 +39,10 @@ Thumbs.db
 .env.*
 !.env.example
 
-# 面板 / 服务器生成文件
+# 服务器本地配置（含本机绝对路径/端口/日志路径，不入版本库）
 .htaccess
 .user.ini
+uwsgi.ini
+uwsgi*.ini
+!uwsgi.ini.example
+gunicorn_conf.local.py

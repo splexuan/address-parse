@@ -141,9 +141,10 @@ address_parse/
 │   └── test_api.py           # HTTP 接口与参数校验测试
 ├── requirements.txt
 ├── gunicorn_conf.py          # Gunicorn 部署配置（可移植，环境变量驱动）
-├── uwsgi.ini                 # uWSGI 部署配置（针对具体服务器，需按环境修改）
 └── LICENSE
 ```
+
+含本机绝对路径的服务器本地配置（`uwsgi.ini`、`.htaccess`、`*.pid`、`gunicorn_conf.local.py` 等）已列入 `.gitignore`，不会进入版本库。
 
 ## 测试
 
@@ -181,12 +182,29 @@ gunicorn -c gunicorn_conf.py --user www --group www app:app
 
 ### uWSGI
 
+`uwsgi.ini` 含本机绝对路径与端口，属于服务器本地配置，不入版本库。需要时在项目根目录自行创建：
+
+```ini
+[uwsgi]
+chdir=/path/to/address_parse
+wsgi-file=/path/to/address_parse/app.py
+callable=app
+processes=4
+threads=2
+http=0.0.0.0:6653
+master=true
+uid=www
+gid=www
+pidfile=/path/to/address_parse/uwsgi.pid
+daemonize=/path/to/address_parse/uwsgi.log
+```
+
 ```bash
 pip install uwsgi
 uwsgi --ini uwsgi.ini
 ```
 
-`uwsgi.ini` 中的 `chdir` / `pidfile` / 日志路径 / 端口均为服务器专用值，移植到其他环境时需自行修改。
+`chdir` 必须写成绝对路径：uWSGI 会先应用 `chdir` 再解析其余相对配置，且它不提供"环境变量缺省值"机制，写成 `%(ENV_XXX)` 时环境变量缺失会导致启动直接失败。
 
 ## 数据说明
 
