@@ -18,10 +18,17 @@ from parser import address_parse
 
 app = Flask(__name__)
 
+# address 长度上限，避免超长文本占用解析资源
+MAX_ADDRESS_LENGTH = 2000
+
 
 # ============================================================
 # 工具函数
 # ============================================================
+
+class ParamError(ValueError):
+    """请求参数非法（对应 HTTP 400）"""
+
 
 def _parse(address, parse_type=0, name_max_length=4, text_filter=None):
     """统一的解析调用"""
@@ -31,6 +38,34 @@ def _parse(address, parse_type=0, name_max_length=4, text_filter=None):
         'nameMaxLength': name_max_length,
     }
     return address_parse(address, options)
+
+
+def _to_int(raw, field, default, min_value=None, max_value=None):
+    """把请求参数转成 int，非法时抛 ParamError
+
+    此前直接透传字符串，会在解析器内部抛 TypeError 返回 500，
+    或（type 字段）静默落回默认模式导致与调用方预期不符。
+    """
+    if raw is None or raw == '':
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ParamError(f'{field} 必须是整数')
+    if min_value is not None and value < min_value:
+        raise ParamError(f'{field} 不能小于 {min_value}')
+    if max_value is not None and value > max_value:
+        raise ParamError(f'{field} 不能大于 {max_value}')
+    return value
+
+
+def _to_text_filter(raw):
+    """text_filter 必须是字符串数组"""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ParamError('text_filter 必须是字符串数组')
+    return [str(item) for item in raw]
 
 
 # ============================================================
@@ -47,23 +82,36 @@ def api_parse():
     try:
         if request.method == "POST":
             data = request.get_json(force=True, silent=True) or {}
+            if not isinstance(data, dict):
+                raise ParamError("请求体必须是 JSON 对象")
             address = data.get("address", "")
-            parse_type = data.get("type", 0)
-            name_max_length = data.get("name_max_length", 4)
-            text_filter = data.get("text_filter", None)
+            parse_type = _to_int(data.get("type"), "type", 0, 0, 1)
+            name_max_length = _to_int(data.get("name_max_length"), "name_max_length", 4, 1, 20)
+            text_filter = _to_text_filter(data.get("text_filter"))
         else:
             address = request.args.get("address", "")
-            parse_type = request.args.get("type", 0, type=int)
-            name_max_length = request.args.get("name_max_length", 4, type=int)
-            text_filter = None
+            parse_type = _to_int(request.args.get("type"), "type", 0, 0, 1)
+            name_max_length = _to_int(request.args.get("name_max_length"), "name_max_length", 4, 1, 20)
+            text_filter = _to_text_filter(request.args.getlist("text_filter") or None)
 
-        if not address:
+        if not isinstance(address, str) or not address.strip():
             return jsonify({"success": False, "data": {}, "message": "缺少 address 参数"}), 400
+
+        if len(address) > MAX_ADDRESS_LENGTH:
+            return jsonify({
+                "success": False,
+                "data": {},
+                "message": f"address 长度不能超过 {MAX_ADDRESS_LENGTH} 个字符",
+            }), 400
 
         result = _parse(address, parse_type, name_max_length, text_filter)
         return jsonify({"success": True, "data": result, "message": "解析成功"})
-    except Exception as e:
-        return jsonify({"success": False, "data": {}, "message": f"解析失败: {str(e)}"}), 500
+    except ParamError as e:
+        return jsonify({"success": False, "data": {}, "message": str(e)}), 400
+    except Exception:
+        # 详细信息只写日志，不回显给调用方
+        app.logger.exception("解析地址失败")
+        return jsonify({"success": False, "data": {}, "message": "解析失败，请稍后重试"}), 500
 
 
 @app.route("/api/health")
@@ -119,9 +167,10 @@ DOCS_HTML = """
         </div>
         <table>
             <tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr>
-            <tr><td><code>address</code></td><td>string</td><td>✅</td><td>待解析的地址字符串（需 URL 编码）</td></tr>
-            <tr><td><code>type</code></td><td>int</td><td>否</td><td>0=正则匹配（默认），1=树查找</td></tr>
-            <tr><td><code>name_max_length</code></td><td>int</td><td>否</td><td>姓名最大长度，默认 4</td></tr>
+            <tr><td><code>address</code></td><td>string</td><td>✅</td><td>待解析的地址字符串（需 URL 编码），最长 2000 字符</td></tr>
+            <tr><td><code>type</code></td><td>int</td><td>否</td><td>0=正则匹配（默认），1=树查找，取值 0~1</td></tr>
+            <tr><td><code>name_max_length</code></td><td>int</td><td>否</td><td>姓名最大长度，默认 4，取值 1~20</td></tr>
+            <tr><td><code>text_filter</code></td><td>string[]</td><td>否</td><td>预清洗词列表，可重复传参，如 <code>text_filter=电话</code></td></tr>
         </table>
         <p><strong>示例（点击可测试）：</strong></p>
         <pre><a href="{{ base_url }}/api/parse?address=%E6%B5%99%E6%B1%9F%E7%9C%81%E6%9D%AD%E5%B7%9E%E5%B8%82%E8%A5%BF%E6%B9%96%E5%8C%BA%E6%96%87%E4%B8%89%E8%B7%AF138%E5%8F%B7%20%E5%BC%A0%E4%B8%89%2013800138000&type=0&name_max_length=4" target="_blank" style="color:#66b3ff;">{{ base_url }}/api/parse?address=%E6%B5%99%E6%B1%9F%E7%9C%81%E6%9D%AD%E5%B7%9E%E5%B8%82%E8%A5%BF%E6%B9%96%E5%8C%BA%E6%96%87%E4%B8%89%E8%B7%AF138%E5%8F%B7%20%E5%BC%A0%E4%B8%89%2013800138000&type=0&name_max_length=4</a></pre>

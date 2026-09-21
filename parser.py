@@ -6,7 +6,7 @@
 import json
 import re
 import os
-from typing import TypedDict, List, Optional, Dict
+from typing import TypedDict, NamedTuple, List, Optional, Dict
 
 # ============================================================
 # 数据加载
@@ -96,26 +96,66 @@ def _compact_json(obj):
     """紧凑JSON序列化（无空格，匹配JS的JSON.stringify格式）"""
     return json.dumps(obj, ensure_ascii=False, separators=(',', ':'))
 
-_province_string = _compact_json(_provinces)
-_city_string = _compact_json(_cities)
-_area_string = _compact_json(_areas)
+
+class GovDataSet(NamedTuple):
+    """一次解析所使用的行政区划数据集（基础数据 + 请求级补充数据）"""
+    provinces: List[GovData]
+    cities: List[GovData]
+    areas: List[GovData]
+    province_string: str
+    city_string: str
+    area_string: str
+
+
+def _build_gov_data_set(provinces: List[GovData], cities: List[GovData],
+                        areas: List[GovData]) -> GovDataSet:
+    return GovDataSet(
+        provinces=provinces,
+        cities=cities,
+        areas=areas,
+        province_string=_compact_json(provinces),
+        city_string=_compact_json(cities),
+        area_string=_compact_json(areas),
+    )
+
+
+# 进程级基础数据（不含任何请求级补充数据）
+_BASE_GOV_DATA = _build_gov_data_set(_provinces, _cities, _areas)
 
 
 def set_extra_gov_data(extra_gov_data: Dict[str, List[GovData]]):
-    """设置额外的国家地理信息数据"""
-    global _provinces, _province_string, _cities, _city_string, _areas, _area_string
+    """向进程级基础数据中追加行政区划
 
-    if extra_gov_data.get('province'):
-        _provinces.extend(extra_gov_data['province'])
-        _province_string = _compact_json(_provinces)
+    注意：这会改变本进程后续所有请求的解析结果，多进程部署时各进程也可能不一致。
+    单次调用如需临时补充区划，请改用 address_parse 的 extraGovData 选项。
+    """
+    global _BASE_GOV_DATA
 
-    if extra_gov_data.get('city'):
-        _cities.extend(extra_gov_data['city'])
-        _city_string = _compact_json(_cities)
+    _provinces.extend(extra_gov_data.get('province') or [])
+    _cities.extend(extra_gov_data.get('city') or [])
+    _areas.extend(extra_gov_data.get('area') or [])
+    _BASE_GOV_DATA = _build_gov_data_set(_provinces, _cities, _areas)
 
-    if extra_gov_data.get('area'):
-        _areas.extend(extra_gov_data['area'])
-        _area_string = _compact_json(_areas)
+
+def _resolve_gov_data(extra_gov_data: Dict[str, List[GovData]] = None) -> GovDataSet:
+    """返回本次解析使用的数据集
+
+    带 extraGovData 时在基础数据的副本上合并，不修改全局状态。
+    """
+    if not isinstance(extra_gov_data, dict):
+        return _BASE_GOV_DATA
+
+    extra_province = list(extra_gov_data.get('province') or [])
+    extra_city = list(extra_gov_data.get('city') or [])
+    extra_area = list(extra_gov_data.get('area') or [])
+    if not (extra_province or extra_city or extra_area):
+        return _BASE_GOV_DATA
+
+    return _build_gov_data_set(
+        _provinces + extra_province,
+        _cities + extra_city,
+        _areas + extra_area,
+    )
 
 
 # ============================================================
@@ -124,11 +164,15 @@ def set_extra_gov_data(extra_gov_data: Dict[str, List[GovData]]):
 
 _CLEAN_KEYWORDS = [
     '详细地址', '收货地址', '收件地址', '地址', '所在地区',
-    '姓名', '收货人', '收件人', '联系人', '收',
+    '姓名', '收货人', '收件人', '联系人',
     '邮编', '联系电话', '电话', '联系人手机号码',
     '手机号码', '手机号',
     '自治区直辖县级行政区划', '省直辖县级行政区划', '市辖区',
 ]
+
+# 字段标签（如"收：张三"）只在紧跟冒号时才剔除；
+# 不能用单字"收"做关键词，否则"回收路""代收点"会被破坏
+_CLEAN_LABEL_PATTERN = re.compile(r'(?:^|\s)[收寄发]\s*[:：]\s*')
 
 _SPECIAL_CHAR_PATTERN = re.compile(
     r"[`~!@#$^&*()=|{}':;',\[\]\.<>/?~！@#￥……&*（）——|{}【】'；：""'。，、？]"
@@ -149,6 +193,9 @@ def clean_address(address: str, text_filter: List[str] = None) -> str:
     all_filters = _CLEAN_KEYWORDS + (text_filter or [])
     for keyword in all_filters:
         address = address.replace(keyword, ' ')
+
+    # 去除"收：""寄："这类字段标签（保留 回收 / 代收 等正常用字）
+    address = _CLEAN_LABEL_PATTERN.sub(' ', address)
 
     # 非数字间的 - 替换为空格（保留 1-1-2406 之类房号）
     address = _DASH_SEP_PATTERN.sub(' ', address)
@@ -171,7 +218,10 @@ def clean_address(address: str, text_filter: List[str] = None) -> str:
 # ============================================================
 
 _MOBILE_REG = re.compile(r'(?:0|\+?86-?|17951)?1[3456789]\d{9}(?:-\d{4})?')
-_POSTAL_CODE_REG = re.compile(r'[1-9]\d{5}(?!\d)')
+# 邮编必须是"独立"的 6 位数字：前后都不能紧邻其它数字，避免从长数字串中截取
+_POSTAL_CODE_REG = re.compile(r'(?<!\d)[1-9]\d{5}(?!\d)')
+# 紧跟在这些字符后面的 6 位数字属于门牌号/房间号，不是邮编
+_POSTAL_SUFFIX_CHARS = '号室栋楼层幢弄座组队村巷排期'
 
 
 def filter_phone(address: str) -> tuple:
@@ -192,12 +242,22 @@ def filter_phone(address: str) -> tuple:
 
 
 def filter_postal_code(address: str) -> tuple:
-    """提取邮编"""
+    """提取邮编
+
+    仅当 6 位数字处于"非门牌号"上下文时才认定为邮编，
+    否则"文三路123456号"这类门牌号会被误当成邮编摘走并破坏详细地址。
+    """
     postal_code = ''
-    match = _POSTAL_CODE_REG.search(address)
-    if match:
+    for match in _POSTAL_CODE_REG.finditer(address):
+        end = match.end()
+        if end < len(address) and address[end] in _POSTAL_SUFFIX_CHARS:
+            # 形如 123456号 / 100022室 → 门牌号、房间号
+            continue
+        if match.start() > 0 and address[match.start() - 1] in _POSTAL_SUFFIX_CHARS:
+            continue
         postal_code = match.group(0)
-        address = address.replace(match.group(0), ' ')
+        address = address[:match.start()] + ' ' + address[end:]
+        break
     return address, postal_code
 
 
@@ -205,14 +265,22 @@ def filter_postal_code(address: str) -> tuple:
 # 地址片段排序
 # ============================================================
 
+_ORDER_KEYWORDS = ['省', '市', '区', '县', '镇']
+
+
 def sort_address(split_address: List[str]) -> List[str]:
-    """按省市区县镇排序，包含这些关键词的片段排前面"""
-    result = []
-    for keyword in ['省', '市', '区', '县', '镇']:
-        for i, item in enumerate(split_address):
-            if keyword in item:
+    """把包含 省/市/区/县/镇 的片段整体前移（按关键词分组，组内保持原顺序）
+
+    原实现每个关键词只前移一个片段，同级的第二个市/区会被留在末尾。
+    """
+    result: List[str] = []
+    for keyword in _ORDER_KEYWORDS:
+        i = 0
+        while i < len(split_address):
+            if keyword in split_address[i]:
                 result.append(split_address.pop(i))
-                break
+            else:
+                i += 1
     return result + split_address
 
 
@@ -223,7 +291,17 @@ def sort_address(split_address: List[str]) -> List[str]:
 _NAME_CALLS = ['先生', '小姐', '同志', '哥哥', '姐姐', '妹妹', '弟弟',
                '妈妈', '爸爸', '爷爷', '奶奶', '姑姑', '舅舅']
 _ADDR_FILTERS = ['街道', '乡镇', '镇', '乡', '路', '巷', '弄', '号', '楼',
-                   '栋', '单元', '室', '座', '层', '门', '队', '组', '村']
+                 '栋', '单元', '室', '座', '层', '门', '队', '组', '村',
+                 # 常见非人名词尾，避免"幸福小区""学军小学"被当成姓名
+                 '小区', '大厦', '大楼', '公寓', '花园', '广场', '中心',
+                 '学校', '小学', '中学', '大学', '学院', '医院', '公司',
+                 '工厂', '酒店', '宾馆', '超市', '驿站', '物业', '快递',
+                 '代收', '门卫']
+
+# 长度同样在 2~4 之间、但显然不是姓名的状态/动作词
+_NON_NAME_WORDS = ['签收', '已收', '待收', '拒收', '退回', '派送', '派件',
+                   '送达', '发货', '收货', '谢谢', '麻烦', '尽快', '务必',
+                   '备注', '急用', '联系']
 
 
 def judge_fragment_is_name(fragment: str, name_max_length: int) -> bool:
@@ -257,8 +335,33 @@ def judge_fragment_is_name(fragment: str, name_max_length: int) -> bool:
 # 正则匹配解析 (type=0)
 # ============================================================
 
-def parse_region_with_regexp(fragment: str, has_parse_result: dict) -> dict:
+# 出现在"残留后缀"之后时，说明该字其实是道路名的一部分（如"东市街"的"市"）
+_STREET_FOLLOW_CHARS = '街路巷弄道'
+
+
+def _strip_legacy_district_suffix(fragment: str, matched_prefix: str,
+                                  area_name: str) -> str:
+    """用户写的是旧区划名（延庆县）而官方名已改为 xx区 时，去掉残留的 县/市
+
+    仅在"官方名 == 已识别前缀 + 区"时生效；再用 _STREET_FOLLOW_CHARS 排除
+    "东区东市街"这类把街道名首字误当成残留后缀的情况。
+    """
+    if (matched_prefix and area_name == matched_prefix + '区'
+            and fragment[:1] in ('县', '市')
+            and fragment[1:2] not in _STREET_FOLLOW_CHARS):
+        return fragment[1:]
+    return fragment
+
+
+def parse_region_with_regexp(fragment: str, has_parse_result: dict,
+                            gov_data: GovDataSet = None) -> dict:
     """利用正则表达式在序列化的 JSON 中匹配省市区"""
+    if gov_data is None:
+        gov_data = _BASE_GOV_DATA
+    province_string = gov_data.province_string
+    city_string = gov_data.city_string
+    area_string = gov_data.area_string
+
     province = list(has_parse_result.get('province', []))
     city = list(has_parse_result.get('city', []))
     area = list(has_parse_result.get('area', []))
@@ -273,7 +376,7 @@ def parse_region_with_regexp(fragment: str, has_parse_result: dict) -> dict:
             regex_province = re.compile(
                 r'\{"code":"[0-9]{1,6}","name":"' + re.escape(s) + r'[\u4E00-\u9FA5]*?"\}'
             )
-            matches = regex_province.findall(_province_string)
+            matches = regex_province.findall(province_string)
             if matches:
                 obj = json.loads(matches[0])
                 if len(matches) == 1:
@@ -294,7 +397,7 @@ def parse_region_with_regexp(fragment: str, has_parse_result: dict) -> dict:
                 r'\{"code":"[0-9]{1,6}","name":"' + re.escape(s) +
                 r'[\u4E00-\u9FA5]*?","provinceCode":"' + province_code + r'"}'
             )
-            matches = regex_city.findall(_city_string)
+            matches = regex_city.findall(city_string)
             if matches:
                 obj = json.loads(matches[0])
                 if len(matches) == 1:
@@ -309,7 +412,7 @@ def parse_region_with_regexp(fragment: str, has_parse_result: dict) -> dict:
             if len(province) == 0:
                 pc = city[0]['provinceCode']
                 regex_p = re.compile(r'\{"code":"' + pc + r'","name":"[\u4E00-\u9FA5]+?"\}')
-                pm = regex_p.findall(_province_string)
+                pm = regex_p.findall(province_string)
                 if pm:
                     province = [json.loads(pm[0])]
 
@@ -324,7 +427,7 @@ def parse_region_with_regexp(fragment: str, has_parse_result: dict) -> dict:
                 r'[\u4E00-\u9FA5]*?","cityCode":"' + city_code +
                 r'","provinceCode":"' + province_code + r'"}'
             )
-            matches = regex_area.findall(_area_string)
+            matches = regex_area.findall(area_string)
             if matches:
                 obj = json.loads(matches[0])
                 if len(matches) == 1:
@@ -335,6 +438,9 @@ def parse_region_with_regexp(fragment: str, has_parse_result: dict) -> dict:
 
         if area and area[0]:
             fragment = fragment.replace(match_str, '', 1) if match_str else fragment
+            # 旧名→新名：延庆县 → 延庆区，去掉残留的"县"
+            fragment = _strip_legacy_district_suffix(
+                fragment, match_str, area[0]['name'])
             # 反推市和省
             if len(city) == 0:
                 cc = area[0]['cityCode']
@@ -342,13 +448,13 @@ def parse_region_with_regexp(fragment: str, has_parse_result: dict) -> dict:
                     r'\{"code":"' + cc + r'","name":"[\u4E00-\u9FA5]+?","provinceCode":"' +
                     area[0]['provinceCode'] + r'"}'
                 )
-                cm = regex_c.findall(_city_string)
+                cm = regex_c.findall(city_string)
                 if cm:
                     city = [json.loads(cm[0])]
             if len(province) == 0:
                 pc = area[0]['provinceCode']
                 regex_p = re.compile(r'\{"code":"' + pc + r'","name":"[\u4E00-\u9FA5]+?"\}')
-                pm = regex_p.findall(_province_string)
+                pm = regex_p.findall(province_string)
                 if pm:
                     province = [json.loads(pm[0])]
 
@@ -367,7 +473,7 @@ def parse_region_with_regexp(fragment: str, has_parse_result: dict) -> dict:
                         r'","cityCode":"' + city_code +
                         r'","provinceCode":"' + province_code + r'"}'
                     )
-                    matches = regex_area.findall(_area_string)
+                    matches = regex_area.findall(area_string)
                     if matches and len(matches) == 1:
                         area = [json.loads(matches[0])]
                         fragment = area[0]['name'] + fragment[idx + 1:]
@@ -387,8 +493,15 @@ def parse_region_with_regexp(fragment: str, has_parse_result: dict) -> dict:
 # 树查找解析 (type=1)
 # ============================================================
 
-def parse_region(fragment: str, has_parse_result: dict) -> dict:
+def parse_region(fragment: str, has_parse_result: dict,
+                 gov_data: GovDataSet = None) -> dict:
     """利用树向下查找解析省市区"""
+    if gov_data is None:
+        gov_data = _BASE_GOV_DATA
+    provinces = gov_data.provinces
+    cities = gov_data.cities
+    areas = gov_data.areas
+
     province = list(has_parse_result.get('province', []))
     city = list(has_parse_result.get('city', []))
     area = list(has_parse_result.get('area', []))
@@ -396,7 +509,7 @@ def parse_region(fragment: str, has_parse_result: dict) -> dict:
 
     # 从省开始查找
     if not province or not province[0]:
-        for temp_province in _provinces:
+        for temp_province in provinces:
             name = temp_province['name']
             replace_name = ''
             for i in range(len(name), 1, -1):
@@ -412,7 +525,7 @@ def parse_region(fragment: str, has_parse_result: dict) -> dict:
     # 从市开始查找
     if not city or not city[0]:
         current_province = province[0] if province and province[0] else None
-        for temp_city in _cities:
+        for temp_city in cities:
             name = temp_city['name']
             pc = temp_city.get('provinceCode', '')
 
@@ -439,7 +552,7 @@ def parse_region(fragment: str, has_parse_result: dict) -> dict:
                 if replace_name:
                     city = [temp_city]
                     # 反推省
-                    for p in _provinces:
+                    for p in provinces:
                         if p['code'] == pc:
                             province = [p]
                             break
@@ -450,7 +563,7 @@ def parse_region(fragment: str, has_parse_result: dict) -> dict:
     current_province = province[0] if province and province[0] else None
     current_city = city[0] if city and city[0] else None
 
-    for temp_area in _areas:
+    for temp_area in areas:
         name = temp_area['name']
         pc = temp_area.get('provinceCode', '')
         cc = temp_area.get('cityCode', '')
@@ -469,16 +582,18 @@ def parse_region(fragment: str, has_parse_result: dict) -> dict:
                 if replace_name:
                     area = [temp_area]
                     if not current_city:
-                        for c in _cities:
+                        for c in cities:
                             if c['code'] == cc:
                                 city = [c]
                                 break
                     if not current_province:
-                        for p in _provinces:
+                        for p in provinces:
                             if p['code'] == pc:
                                 province = [p]
                                 break
-                    fragment = fragment.replace(replace_name, '', 1)
+                    fragment = _strip_legacy_district_suffix(
+                        fragment.replace(replace_name, '', 1),
+                        replace_name, temp_area['name'])
                     break
         else:
             replace_name = ''
@@ -489,15 +604,17 @@ def parse_region(fragment: str, has_parse_result: dict) -> dict:
                     break
             if replace_name:
                 area = [temp_area]
-                for c in _cities:
+                for c in cities:
                     if c['code'] == cc:
                         city = [c]
                         break
-                for p in _provinces:
+                for p in provinces:
                     if p['code'] == pc:
                         province = [p]
                         break
-                fragment = fragment.replace(replace_name, '', 1)
+                fragment = _strip_legacy_district_suffix(
+                    fragment.replace(replace_name, '', 1),
+                    replace_name, temp_area['name'])
                 break
 
     # 容错：县→区（如蓟县→蓟州区、延庆县→延庆区）
@@ -511,7 +628,7 @@ def parse_region(fragment: str, has_parse_result: dict) -> dict:
             prefix = fragment[:idx]
             for i in range(len(prefix), 0, -1):
                 s = prefix[:i]
-                for temp_area in _areas:
+                for temp_area in areas:
                     name = temp_area['name']
                     if name.startswith(s) and name.endswith(new_suffix):
                         if (not pc or temp_area.get('provinceCode') == pc) and \
@@ -553,10 +670,22 @@ def address_parse(address: str, options: ParseOptions = None) -> ParseResult:
     if options is None:
         options = {}
 
-    parse_type = options.get('type', 0)
     extra_gov_data = options.get('extraGovData', {})
     text_filter = options.get('textFilter', [])
     name_max_length = options.get('nameMaxLength', 4)
+
+    # 参数归一化：直接以 Python 调用本模块时也可能传入字符串
+    try:
+        parse_type = int(options.get('type', 0))
+    except (TypeError, ValueError):
+        parse_type = 0
+    try:
+        name_max_length = int(name_max_length)
+    except (TypeError, ValueError):
+        name_max_length = 4
+    if not isinstance(text_filter, (list, tuple)):
+        text_filter = []
+    text_filter = [str(k) for k in text_filter]
 
     if not address:
         return {
@@ -565,9 +694,8 @@ def address_parse(address: str, options: ParseOptions = None) -> ParseResult:
             'provinceCode': '', 'cityCode': '', 'areaCode': ''
         }
 
-    # 设置额外行政区划数据
-    if extra_gov_data:
-        set_extra_gov_data(extra_gov_data)
+    # 本次请求使用的行政区划数据集（extraGovData 只在副本上合并，不污染全局）
+    gov_data = _resolve_gov_data(extra_gov_data)
 
     parse_result = {
         'phone': '',
@@ -601,9 +729,9 @@ def address_parse(address: str, options: ParseOptions = None) -> ParseResult:
                 not parse_result['city'] or not parse_result['city'][0] or
                 not parse_result['area'] or not parse_result['area'][0]):
             if parse_type == 1:
-                parsed = parse_region(item, parse_result)
+                parsed = parse_region(item, parse_result, gov_data)
             else:
-                parsed = parse_region_with_regexp(item, parse_result)
+                parsed = parse_region_with_regexp(item, parse_result, gov_data)
 
             parse_result['province'] = parsed.get('province', []) or parse_result['province']
             parse_result['area'] = parsed.get('area', []) or parse_result['area']
@@ -624,41 +752,41 @@ def address_parse(address: str, options: ParseOptions = None) -> ParseResult:
     detail_list = parse_result['detail']
 
     # 从详细地址中去掉已识别的省市区名称
+    # 必须在同一片段上累积替换：原实现用原始 item 逐个替换，后一次会覆盖前一次
+    recognized_names = [obj['name'] for obj in (province_obj, city_obj, area_obj)
+                        if obj and obj.get('name')]
     for i, item in enumerate(detail_list):
-        for obj in [province_obj, city_obj, area_obj]:
-            if obj and obj['name'] in item:
-                detail_list[i] = item.replace(obj['name'], '')
+        for name in recognized_names:
+            item = item.replace(name, '')
+        detail_list[i] = item
 
-    # 去重
-    detail_list = list({d for d in detail_list if d.strip()})
+    # 保序去重（set 的顺序受哈希随机化影响，会导致详细地址拼接顺序不稳定）
+    detail_list = list(dict.fromkeys(d.strip() for d in detail_list if d.strip()))
 
     # 从详细地址中识别姓名
     if detail_list:
-        copy_detail = sorted(
-            [d for d in detail_list if d.strip()],
-            key=lambda x: len(x)
-        )
+        copy_detail = sorted(detail_list, key=len)
         name = ''
         for d in copy_detail:
             if judge_fragment_is_name(d, name_max_length):
                 name = d
                 break
 
-        if not name and copy_detail:
+        if not name:
             first = copy_detail[0]
-            # 即使 judge_fragment_is_name 返回了 False，也要检查是否包含地址关键词
+            # 兜底：至少 2 个字、含中文、不含地址关键词，也不是"已签收"这类状态词
+            # 注意不能要求首字是常见姓氏：少数民族姓名（如"阿依古丽"）会被误杀
             has_addr_keyword = any(kw in first for kw in _ADDR_FILTERS)
-            if (len(first) <= name_max_length and
+            has_status_keyword = any(kw in first for kw in _NON_NAME_WORDS)
+            if (2 <= len(first) <= name_max_length and
                     re.search(r'[\u4E00-\u9FA5]', first) and
-                    not has_addr_keyword):
+                    not has_addr_keyword and
+                    not has_status_keyword):
                 name = first
 
         if name:
             parse_result['name'] = name
-            try:
-                detail_list.remove(name)
-            except ValueError:
-                pass
+            detail_list = [d for d in detail_list if d != name]
 
     # 处理城市名称（直辖市的"市辖区"等特殊名称用省份名替代）
     province_name = province_obj['name'] if province_obj else ''
@@ -670,7 +798,7 @@ def address_parse(address: str, options: ParseOptions = None) -> ParseResult:
     # 省直辖县级（code 含90）：移到 area，city 置空
     # 地级市直管（东莞/中山/嘉峪关等）：保留在 city
     if city_obj and not area_obj:
-        for a in _areas:
+        for a in gov_data.areas:
             if a.get('code') == city_obj['code'] and a.get('name') == city_obj['name']:
                 if city_obj['code'][2:4] == '90':
                     # 省直辖县级（如神农架 429021、仙桃 429004）
