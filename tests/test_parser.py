@@ -220,6 +220,113 @@ class TestNameDetection(unittest.TestCase):
         self.assertEqual(r['name'], '')
 
 
+class TestSameNameDistrict(unittest.TestCase):
+    """同名区县不能串到外省（徐州鼓楼区 vs 南京鼓楼区）"""
+
+    def test_tree_mode_uses_city_scope(self):
+        for parse_type in (0, 1):
+            with self.subTest(parse_type=parse_type):
+                r = address_parse('徐州市鼓楼区中山北路1号 张三',
+                                  {'type': parse_type})
+                self.assertEqual((r['city'], r['area'], r['areaCode']),
+                                 ('徐州市', '鼓楼区', '320302'))
+
+    def test_explicit_city_still_wins(self):
+        r = address_parse('江苏省南京市鼓楼区中山北路1号 张三', {'type': 1})
+        self.assertEqual(r['areaCode'], '320106')
+
+
+class TestNameFalsePositives(unittest.TestCase):
+    """小区 / 机构 / 状态词不能被当成姓名"""
+
+    def test_place_or_community_name_is_not_name(self):
+        for fragment in ('东方时代7幢1701', '妈妈驿站', '谢谢', '开发区',
+                         '幸福家园'):
+            with self.subTest(fragment=fragment):
+                r = address_parse(f'浙江省杭州市西湖区文三路138号 {fragment}')
+                self.assertEqual(r['name'], '')
+                self.assertIn(fragment, r['detail'])
+
+    def test_region_name_is_not_name(self):
+        """与区县同名的片段（朝阳）不应被当成姓名"""
+        r = address_parse('北京市朝阳区建国路88号 朝阳')
+        self.assertEqual(r['name'], '')
+
+
+class TestAdminNoise(unittest.TestCase):
+    """层级之间残留的 州/地区/省/县 不能挡住下一级匹配"""
+
+    def test_abbreviated_autonomous_prefecture(self):
+        for parse_type in (0, 1):
+            with self.subTest(parse_type=parse_type):
+                r = address_parse('云南省文山州富宁县新华镇 张三',
+                                  {'type': parse_type})
+                self.assertEqual((r['city'], r['area'], r['areaCode']),
+                                 ('文山壮族苗族自治州', '富宁县', '532628'))
+                self.assertEqual(r['detail'], '新华镇')
+
+    def test_prefecture_noise(self):
+        for parse_type in (0, 1):
+            with self.subTest(parse_type=parse_type):
+                r = address_parse('贵州省毕节地区织金县 张三',
+                                  {'type': parse_type})
+                self.assertEqual((r['city'], r['area']), ('毕节市', '织金县'))
+
+    def test_province_suffix_noise(self):
+        for parse_type in (0, 1):
+            with self.subTest(parse_type=parse_type):
+                r = address_parse('广西省南宁市青秀区 张三',
+                                  {'type': parse_type})
+                self.assertEqual((r['province'], r['city'], r['area']),
+                                 ('广西壮族自治区', '南宁市', '青秀区'))
+
+
+class TestUnicodeWhitespace(unittest.TestCase):
+    """全角空格不能把姓名 / 手机号粘在正文里"""
+
+    def test_full_width_space_separated_fields(self):
+        r = address_parse('北京市朝阳区建国路88号　李四　13912345678')
+        self.assertEqual(r['phone'], '13912345678')
+        self.assertEqual(r['name'], '李四')
+        self.assertEqual(r['detail'], '建国路88号')
+
+
+class TestStrictNameMode(unittest.TestCase):
+    """严格姓名模式（opt-in）：没有可信信号时不输出姓名"""
+
+    def test_name_next_to_phone(self):
+        r = address_parse('浙江省杭州市西湖区文三路138号 张三 13800138000',
+                          {'nameMode': 'strict'})
+        self.assertEqual(r['name'], '张三')
+
+    def test_name_with_marker(self):
+        r = address_parse('收货人：张三 浙江省杭州市西湖区文三路138号',
+                          {'nameMode': 'strict'})
+        self.assertEqual(r['name'], '张三')
+
+    def test_name_with_title(self):
+        r = address_parse('浙江省杭州市西湖区文三路138号 李四先生',
+                          {'nameMode': 'strict'})
+        self.assertEqual(r['name'], '李四先生')
+
+    def test_bare_name_without_signal_is_skipped(self):
+        """已知取舍：空格分隔的裸姓名在严格模式下不输出"""
+        r = address_parse('浙江省杭州市西湖区文三路138号 张三',
+                          {'nameMode': 'strict'})
+        self.assertEqual(r['name'], '')
+        self.assertIn('张三', r['detail'])
+
+    def test_snake_case_option(self):
+        r = address_parse('浙江省杭州市西湖区文三路138号 张三 13800138000',
+                          {'name_mode': 'strict'})
+        self.assertEqual(r['name'], '张三')
+
+    def test_invalid_mode_falls_back_to_loose(self):
+        r = address_parse('浙江省杭州市西湖区文三路138号 张三',
+                          {'nameMode': 'unknown'})
+        self.assertEqual(r['name'], '张三')
+
+
 class TestSortAddress(unittest.TestCase):
     """片段排序"""
 

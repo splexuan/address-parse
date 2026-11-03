@@ -57,6 +57,22 @@ class TestParseEndpoint(ApiTestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.get_json()['data']['city'], '杭州市')
 
+    def test_strict_name_mode_via_post(self):
+        resp = self.client.post('/api/parse', json={
+            'address': '浙江省杭州市西湖区文三路138号 张三',
+            'name_mode': 'strict',
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()['data']['name'], '')
+
+    def test_strict_name_mode_via_get(self):
+        resp = self.client.get('/api/parse', query_string={
+            'address': ADDRESS,
+            'name_mode': 'strict',
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()['data']['name'], '张三')
+
 
 class TestParameterValidation(ApiTestCase):
     """非法参数必须返回 400 而不是 500，也不能静默降级"""
@@ -90,6 +106,13 @@ class TestParameterValidation(ApiTestCase):
     def test_out_of_range_name_max_length_is_rejected(self):
         resp = self.client.post('/api/parse', json={'address': ADDRESS, 'name_max_length': 0})
         self.assertEqual(resp.status_code, 400)
+
+    def test_invalid_name_mode_is_rejected(self):
+        resp = self.client.post('/api/parse', json={
+            'address': ADDRESS, 'name_mode': 'fuzzy',
+        })
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn('name_mode', resp.get_json()['message'])
 
     def test_text_filter_must_be_list(self):
         resp = self.client.post('/api/parse', json={'address': ADDRESS, 'text_filter': '电话'})

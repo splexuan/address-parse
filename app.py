@@ -30,12 +30,14 @@ class ParamError(ValueError):
     """请求参数非法（对应 HTTP 400）"""
 
 
-def _parse(address, parse_type=0, name_max_length=4, text_filter=None):
+def _parse(address, parse_type=0, name_max_length=4, text_filter=None,
+           name_mode='loose'):
     """统一的解析调用"""
     options = {
         'type': parse_type,
         'textFilter': text_filter or [],
         'nameMaxLength': name_max_length,
+        'nameMode': name_mode,
     }
     return address_parse(address, options)
 
@@ -68,6 +70,15 @@ def _to_text_filter(raw):
     return [str(item) for item in raw]
 
 
+def _to_name_mode(raw):
+    """name_mode 只能是 loose（默认）或 strict"""
+    if raw is None or raw == '':
+        return 'loose'
+    if not isinstance(raw, str) or raw.lower() not in ('loose', 'strict'):
+        raise ParamError('name_mode 只能是 loose 或 strict')
+    return raw.lower()
+
+
 # ============================================================
 # API 接口
 # ============================================================
@@ -88,11 +99,13 @@ def api_parse():
             parse_type = _to_int(data.get("type"), "type", 0, 0, 1)
             name_max_length = _to_int(data.get("name_max_length"), "name_max_length", 4, 1, 20)
             text_filter = _to_text_filter(data.get("text_filter"))
+            name_mode = _to_name_mode(data.get("name_mode"))
         else:
             address = request.args.get("address", "")
             parse_type = _to_int(request.args.get("type"), "type", 0, 0, 1)
             name_max_length = _to_int(request.args.get("name_max_length"), "name_max_length", 4, 1, 20)
             text_filter = _to_text_filter(request.args.getlist("text_filter") or None)
+            name_mode = _to_name_mode(request.args.get("name_mode"))
 
         if not isinstance(address, str) or not address.strip():
             return jsonify({"success": False, "data": {}, "message": "缺少 address 参数"}), 400
@@ -104,7 +117,8 @@ def api_parse():
                 "message": f"address 长度不能超过 {MAX_ADDRESS_LENGTH} 个字符",
             }), 400
 
-        result = _parse(address, parse_type, name_max_length, text_filter)
+        result = _parse(address, parse_type, name_max_length, text_filter,
+                        name_mode)
         return jsonify({"success": True, "data": result, "message": "解析成功"})
     except ParamError as e:
         return jsonify({"success": False, "data": {}, "message": str(e)}), 400
@@ -170,6 +184,7 @@ DOCS_HTML = """
             <tr><td><code>address</code></td><td>string</td><td>✅</td><td>待解析的地址字符串（需 URL 编码），最长 2000 字符</td></tr>
             <tr><td><code>type</code></td><td>int</td><td>否</td><td>0=正则匹配（默认），1=树查找，取值 0~1</td></tr>
             <tr><td><code>name_max_length</code></td><td>int</td><td>否</td><td>姓名最大长度，默认 4，取值 1~20</td></tr>
+            <tr><td><code>name_mode</code></td><td>string</td><td>否</td><td>姓名识别模式：<code>loose</code>（默认，宽松）或 <code>strict</code>（严格，需收货人标记 / 紧邻手机号 / 称呼词等可信信号才输出姓名）</td></tr>
             <tr><td><code>text_filter</code></td><td>string[]</td><td>否</td><td>预清洗词列表，可重复传参，如 <code>text_filter=电话</code></td></tr>
         </table>
         <p><strong>示例（点击可测试）：</strong></p>
@@ -187,6 +202,7 @@ DOCS_HTML = """
   "address": "浙江省杭州市西湖区文三路138号 张三 13800138000",
   "type": 0,
   "name_max_length": 4,
+  "name_mode": "loose",
   "text_filter": ["电话", "联系人"]
 }</pre>
     </div>
